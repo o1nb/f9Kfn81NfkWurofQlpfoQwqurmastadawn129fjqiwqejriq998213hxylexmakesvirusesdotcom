@@ -519,7 +519,7 @@ run(function()
 		end
 	end
 
-	fu	function whitelist:hook()
+	function whitelist:hook()
 		if self.hooked then return end
 		self.hooked = true
 
