@@ -410,10 +410,32 @@ run(function()
 		return false
 	end
 
+	local function normaliseTagColor(col)
+		if typeof(col) == 'Color3' then
+			return col
+		end
+
+		if typeof(col) == 'table' then
+			return Color3.fromRGB(tonumber(col[1]) or 255, tonumber(col[2]) or 255, tonumber(col[3]) or 255)
+		end
+
+		return Color3.fromRGB(255, 255, 255)
+	end
+
 	function whitelist:tag(plr, text, rich)
-		local plrtag, newtag = table.clone(select(3, self:get(plr)) or self.customtags[plr.Name] or {}), ''
+		local _, _, rawtags = self:get(plr)
+		local plrtag = table.clone(rawtags or self.customtags[plr.Name] or self.customtags[tostring(plr.UserId)] or {})
+		local newtag = ''
+
+		for _, tag in plrtag do
+			if type(tag) == 'table' then
+				tag.color = normaliseTagColor(tag.color)
+				tag.text = tostring(tag.text or '')
+			end
+		end
+
 		for _, v in self.tagcallback do
-			v(plr, plrtag, rich)
+			pcall(v, plr, plrtag, rich)
 		end
 
 		if not text then
@@ -421,7 +443,10 @@ run(function()
 		end
 
 		for _, v in plrtag do
-			newtag = newtag..(rich and v.color and '<font color="#'..v.color:ToHex()..'">['..v.text..']</font>' or '['..removeTags(v.text)..']')..' '
+			if type(v) == 'table' and v.text ~= '' then
+				local clean = removeTags(v.text)
+				newtag ..= (rich and v.color and '<font color="#'..v.color:ToHex()..'">['..clean..']</font>' or '['..clean..']')..' '
+			end
 		end
 
 		return newtag
@@ -483,65 +508,77 @@ run(function()
 	end
 
 	function whitelist:newchat(obj, plr, skip)
-		obj.PrefixText = self:tag(plr, true, true)..(obj.PrefixText or '')
+		local prefix = self:tag(plr, true, true)
+		if prefix ~= '' then
+			obj.PrefixText = prefix..(obj.PrefixText or '')
+		end
 
-		if not skip and self:process(obj.Text, plr) then
-			obj.Visible = false
+		if not skip and self:process(obj.Text or '', plr) then
+			pcall(function() obj.Text = '' end)
+			pcall(function() obj.Visible = false end)
 		end
 	end
 
-	function whitelist:oldchat(func)
-		local msgtable, oldchat = debug.getupvalue(func, 3)
-		if typeof(msgtable) == 'table' and msgtable.CurrentChannel then
-			whitelist.oldchattable = msgtable
-		end
-
-		oldchat = hookfunction(func, function(data, ...)
-			local plr = playersService:GetPlayerByUserId(data.SpeakerUserId)
-			if plr then
-				data.ExtraData.Tags = data.ExtraData.Tags or {}
-				for _, v in self:tag(plr) do
-					table.insert(data.ExtraData.Tags, {TagText = v.text, TagColor = v.color})
-				end
-
-				if data.Message and self:process(data.Message, plr) then
-					data.Message = ''
-				end
-			end
-
-			return oldchat(data, ...)
-		end)
-
-		vape:Clean(function()
-			hookfunction(func, oldchat)
-		end)
-	end
-
-	function whitelist:hook()
+	fu	function whitelist:hook()
 		if self.hooked then return end
 		self.hooked = true
 
 		if textChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+			local oldIncoming
+			pcall(function()
+				oldIncoming = textChatService.OnIncomingMessage
+			end)
+
+			local hooked = pcall(function()
+				textChatService.OnIncomingMessage = function(message)
+					local props
+
+					if oldIncoming then
+						local ok, result = pcall(oldIncoming, message)
+						if ok and result then
+							props = result
+						end
+					end
+
+					props = props or Instance.new('TextChatMessageProperties')
+					props.PrefixText = props.PrefixText or message.PrefixText or ''
+					props.Text = props.Text or message.Text or ''
+
+					local plr = message.TextSource and playersService:GetPlayerByUserId(message.TextSource.UserId)
+					if plr then
+						self:newchat(props, plr, message.Status ~= Enum.TextChatMessageStatus.Success)
+					end
+
+					return props
+				end
+			end)
+
+			if hooked then
+				vape:Clean(function()
+					pcall(function()
+						textChatService.OnIncomingMessage = oldIncoming
+					end)
+				end)
+				return
+			end
+
+			-- Fallback for executors that block direct callback assignment.
 			if getcallbackvalue and restorefunction and hookfunction then
 				local old
 				task.spawn(function()
 					repeat
 						local current = getcallbackvalue(textChatService, 'OnIncomingMessage')
 
-						if old ~= current then
+						if current and old ~= current then
 							local hook
 							hook = hookfunction(current, function(...)
 								local msg = ...
-								local data = hook(...)
+								local data = hook(...) or Instance.new('TextChatMessageProperties')
 								local plr = msg.TextSource and playersService:GetPlayerByUserId(msg.TextSource.UserId)
 
 								if plr then
-									if not (data and data:IsA('TextChatMessageProperties') and data.PrefixText ~= '') then
-										data = Instance.new('TextChatMessageProperties')
-										data.PrefixText = msg.PrefixText
-										data.Text = msg.Text
-									end
-
+									data.PrefixText = data.PrefixText or msg.PrefixText or ''
+									data.Text = data.Text or msg.Text or ''
 									self:newchat(data, plr, msg.Status ~= Enum.TextChatMessageStatus.Success)
 								end
 
@@ -556,6 +593,28 @@ run(function()
 
 					if old then
 						restorefunction(old)
+					end
+				end)
+			end
+		elseif replicatedStorage:FindFirstChild('DefaultChatSystemChatEvents') then
+			pcall(function()
+				for _, v in getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnNewMessage.OnClientEvent) do
+					if v.Function and table.find(debug.getconstants(v.Function), 'UpdateMessagePostedInChannel') then
+						whitelist:oldchat(v.Function)
+						break
+					end
+				end
+
+				for _, v in getconnections(replicatedStorage.DefaultChatSystemChatEvents.OnMessageDoneFiltering.OnClientEvent) do
+					if v.Function and table.find(debug.getconstants(v.Function), 'UpdateMessageFiltered') then
+						whitelist:oldchat(v.Function)
+						break
+					end
+				end
+			end)
+		end
+	end
+ion(old)
 					end
 				end)
 			end
