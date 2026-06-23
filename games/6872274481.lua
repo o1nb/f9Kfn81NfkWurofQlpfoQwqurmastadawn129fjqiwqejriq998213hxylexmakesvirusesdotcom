@@ -344,19 +344,144 @@ local function roundPos(vec)
 	return Vector3.new(math.round(vec.X / 3) * 3, math.round(vec.Y / 3) * 3, math.round(vec.Z / 3) * 3)
 end
 
+local function getInventoryItemFromTool(tool)
+	if not tool then return nil, nil end
+	local wantedTool = typeof(tool) == 'table' and tool.tool or tool
+	local wantedType = typeof(tool) == 'table' and tool.itemType or nil
+
+	for slot, item in store.inventory.inventory.items do
+		if item and (item.tool == wantedTool or (wantedType and item.itemType == wantedType)) then
+			return item, slot
+		end
+	end
+
+	return nil, nil
+end
+
+local function updateLocalHand(tool, item)
+	local character = lplr.Character
+	local check = character and character:FindFirstChild('HandInvItem')
+	local handTool = typeof(tool) == 'table' and tool.tool or tool
+
+	if check and handTool then
+		pcall(function()
+			check.Value = handTool
+		end)
+	end
+
+	item = item or select(1, getInventoryItemFromTool(handTool))
+	if item then
+		local itemMeta = bedwars.ItemMeta[item.itemType] or {}
+		store.hand = {
+			tool = item.tool or handTool,
+			amount = item.amount or 0,
+			toolType = itemMeta.sword and 'sword' or itemMeta.block and 'block' or tostring(item.itemType):find('bow') and 'bow' or item.itemType
+		}
+	end
+end
+
+local function callEquipItemRemote(tool)
+	if not (bedwars.Client and bedwars.Client.Get) then return false end
+
+	local payloads = {
+		{hand = tool},
+		{tool = tool},
+		{item = tool},
+		tool
+	}
+
+	local remoteNames = {
+		remotes.EquipItem,
+		'EquipItem',
+		'InventoryEquipItem',
+		'InventorySetHand',
+		'SetHandItem'
+	}
+
+	local seen = {}
+	for _, remoteName in remoteNames do
+		if remoteName and remoteName ~= '' and not seen[remoteName] then
+			seen[remoteName] = true
+
+			local ok, remote = pcall(function()
+				return bedwars.Client:Get(remoteName)
+			end)
+
+			if ok and remote then
+				for _, payload in payloads do
+					if remote.CallServerAsync and pcall(function() return remote:CallServerAsync(payload) end) then
+						return true
+					end
+
+					if remote.SendToServer and pcall(function() return remote:SendToServer(payload) end) then
+						return true
+					end
+
+					if remote.CallServer and pcall(function() return remote:CallServer(payload) end) then
+						return true
+					end
+
+					local instance = remote.instance
+					if instance and instance:IsA('RemoteEvent') and pcall(function() instance:FireServer(payload) end) then
+						return true
+					end
+
+					if instance and instance:IsA('RemoteFunction') and pcall(function() return instance:InvokeServer(payload) end) then
+						return true
+					end
+				end
+			end
+		end
+	end
+
+	return false
+end
+
 local function switchItem(tool, delayTime)
 	delayTime = delayTime or 0.05
-	local check = lplr.Character and lplr.Character:FindFirstChild('HandInvItem') or nil
-	if check and check.Value ~= tool and tool.Parent ~= nil then
-		task.spawn(function()
-			bedwars.Client:Get(remotes.EquipItem):CallServerAsync({hand = tool})
-		end)
-		check.Value = tool
-		if delayTime > 0 then
-			task.wait(delayTime)
-		end
+
+	local handTool = typeof(tool) == 'table' and tool.tool or tool
+	if not handTool then return false end
+
+	local item, slot = getInventoryItemFromTool(handTool)
+	if item and item.tool then
+		handTool = item.tool
+	end
+
+	if typeof(handTool) == 'Instance' and not handTool.Parent then
+		return false
+	end
+
+	local check = lplr.Character and lplr.Character:FindFirstChild('HandInvItem')
+	if check and check.Value == handTool then
+		updateLocalHand(handTool, item)
 		return true
 	end
+
+	-- Keep the Redux hotbar selection in sync when the item is a hotbar item.
+	if slot then
+		pcall(function()
+			bedwars.Store:dispatch({
+				type = 'InventorySelectHotbarSlot',
+				slot = slot
+			})
+		end)
+	end
+
+	local switched = callEquipItemRemote(handTool)
+	if switched or check then
+		updateLocalHand(handTool, item)
+	end
+
+	if delayTime > 0 then
+		local started = tick()
+		repeat
+			if check and check.Value == handTool then break end
+			task.wait()
+		until tick() - started >= delayTime
+	end
+
+	return switched or (check and check.Value == handTool) or false
 end
 
 local function waitForChildOfType(obj, name, timeout, prop)
