@@ -702,6 +702,59 @@ run(function()
 		end)
 	end
 
+
+	function whitelist:notifyLocalRank()
+		local level, attackable, tags = self:get(lplr)
+		level = tonumber(level) or 0
+
+		local rankName = level <= 0 and 'Default' or level == 1 and 'Private' or level == 2 and 'Owner' or level >= 900 and 'Admin' or ('Level '..tostring(level))
+		local tagText, tagCount = '', 0
+
+		for _, tag in (tags or {}) do
+			if type(tag) == 'table' and tag.text and tostring(tag.text) ~= '' then
+				tagCount += 1
+				tagText ..= '['..removeTags(tostring(tag.text))..'] '
+			end
+		end
+
+		if tagText == '' then
+			tagText = 'None'
+		end
+
+		local abilities = {}
+		if level > 0 then
+			table.insert(abilities, 'Tag display')
+			table.insert(abilities, 'Priority '..tostring(level))
+			table.insert(abilities, 'Private commands')
+			if level >= 2 then
+				table.insert(abilities, 'Higher than rank 1')
+			end
+			if level >= 900 then
+				table.insert(abilities, 'Admin priority')
+			end
+		else
+			table.insert(abilities, 'None')
+		end
+
+		local commandCount = 0
+		for _ in (self.commands or {}) do
+			commandCount += 1
+		end
+		if commandCount > 0 and level > 0 then
+			table.insert(abilities, tostring(commandCount)..' commands loaded')
+		end
+
+		local message = 'Rank: '..rankName..' (Level '..tostring(level)..')\nTag: '..tagText..'\nAbilities: '..table.concat(abilities, ', ')
+		local signature = tostring(level)..'|'..tagText..'|'..table.concat(abilities, ',')..'|'..tostring(attackable)
+
+		if self.rankNotificationSignature == signature then
+			return
+		end
+		self.rankNotificationSignature = signature
+
+		notif('Whitelist', message, 18, level > 0 and 'success' or 'warning')
+	end
+
 	function whitelist:update(first)
 		local suc = pcall(function()
 			local _, subbed = pcall(function()
@@ -730,10 +783,16 @@ run(function()
 			for _, v in whitelist.data.WhitelistedUsers do
 				if v.tags then
 					for _, tag in v.tags do
-						tag.color = Color3.fromRGB(unpack(tag.color))
+						if typeof(tag.color) ~= 'Color3' then
+							tag.color = Color3.fromRGB(unpack(tag.color))
+						end
 					end
 				end
 			end
+
+			pcall(function()
+				whitelist:notifyLocalRank()
+			end)
 
 			if not whitelist.connection then
 				whitelist.connection = playersService.PlayerAdded:Connect(function(v)
